@@ -7,18 +7,23 @@ import torch
 import torch.nn as nn
 import torch.nn.parallel
 import torch.utils.data
-import visdom
+# import visdom
 import torch.optim as optim
 from data.load_data import load_data
 
-vis = visdom.Visdom()
-vis.env = 'vae_dcgan'
+from torchvision.utils import make_grid
+
+from utils.utils import combine_images, save_image
+from tensorboardX import SummaryWriter
+
+# vis = visdom.Visdom()
+# vis.env = 'vae_dcgan'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='mnist', help='cifar10 | lsun | imagenet | folder | lfw ')
 # parser.add_argument('--dataroot', required=True, help='path to dataset')
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
-parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
+parser.add_argument('--batchSize', type=int, default=128, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=32, help='the height / width of the input image to network')
 parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
@@ -146,7 +151,7 @@ class _netG(nn.Module):
         # input is Z, going into a convolution
         self.decoder.add_module('input-conv', nn.ConvTranspose2d(nz, ngf * 2 ** (n - 3), 4, 1, 0, bias=False))
         self.decoder.add_module('input-batchnorm', nn.BatchNorm2d(ngf * 2 ** (n - 3)))
-        self.decoder.add_module('input-relu', nn.LeakyReLU(0.2, inplace=True))
+        self.decoder.add_module('input-relu', nn.ReLU(inplace=True))
 
         # state size. (ngf * 2**(n-3)) x 4 x 4
 
@@ -155,7 +160,7 @@ class _netG(nn.Module):
                                     nn.ConvTranspose2d(ngf * 2 ** i, ngf * 2 ** (i - 1), 4, 2, 1, bias=False))
             self.decoder.add_module('pyramid_{0}_batchnorm'.format(ngf * 2 ** (i - 1)),
                                     nn.BatchNorm2d(ngf * 2 ** (i - 1)))
-            self.decoder.add_module('pyramid_{0}_relu'.format(ngf * 2 ** (i - 1)), nn.LeakyReLU(0.2, inplace=True))
+            self.decoder.add_module('pyramid_{0}_relu'.format(ngf * 2 ** (i - 1)), nn.ReLU(inplace=True))
 
         self.decoder.add_module('ouput-conv', nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False))
         self.decoder.add_module('output-tanh', nn.Tanh())
@@ -206,8 +211,6 @@ class _netD(nn.Module):
         return output.view(-1, 1)
 
 
-# torch.te
-
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
 fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
@@ -219,36 +222,36 @@ netG = _netG(opt.imageSize, ngpu)
 netG.apply(weights_init)
 # if opt.netG != '':
 #     netG.load_state_dict(torch.load(opt.netG))
-# print(netG)
 
 netD = _netD(opt.imageSize,ngpu)
 netD.apply(weights_init)
 # if opt.netD != '':
 #     netD.load_state_dict(torch.load(opt.netD))
-# print(netD)
 #
 criterion = nn.BCELoss()
 MSECriterion = nn.MSELoss()
-#
-# if opt.cuda:
-#     netD.cuda()
-#     netG.make_cuda()
-#     criterion.cuda()
-#     MSECriterion.cuda()
-#     input, label = input.cuda(), label.cuda()
-#     noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
-#
-# input = Variable(input)
-# label = Variable(label)
-# noise = Variable(noise)
-# fixed_noise = Variable(fixed_noise)
+
+
+if opt.cuda:
+    print("OK")
+    netD.cuda()
+    print("OK")
+    netG.make_cuda()
+    print("OK")
+    criterion.cuda()
+    print("OK")
+    MSECriterion.cuda()
+    print("OK")
+    input, label = input.cuda(), label.cuda()
+    print("OK")
+    noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
 #
 # # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 #
-# gen_win = None
-# rec_win = None
+writer = SummaryWriter()
+
 #
 for epoch in range(opt.niter):
     for i, data in enumerate(dataloader, 0):
@@ -271,6 +274,9 @@ for epoch in range(opt.niter):
         noise.data.resize_(batch_size, nz, 1, 1)
         noise.data.normal_(0, 1)
         gen = netG.decoder(noise)
+
+        # if i == 0:
+        #     save_image(combine_images(gen), f"images/{epoch}_{i}.png")
         # gen_win = vis.image(gen.data[0].cpu()*0.5+0.5,win = gen_win)
         label.data.fill_(fake_label)
         output = netD(gen.detach())
@@ -292,6 +298,8 @@ for epoch in range(opt.niter):
 
         sampled = netG.sampler(encoded)
         rec = netG.decoder(sampled)
+        # if i == 0:
+        #     save_image(combine_images(rec), f"reconstructions/{epoch}_{i}.png")
         # rec_win = vis.image(rec.data[0].cpu()*0.5+0.5,win = rec_win)
 
         MSEerr = MSECriterion(rec,input)
@@ -303,19 +311,32 @@ for epoch in range(opt.niter):
         ############################
         # (3) Update G network: maximize log(D(G(z)))
         ###########################
-        netG.zero_grad()
-        label.data.fill_(real_label)  # fake labels are real for generator cost
+        # netG.zero_grad()
+        # label.data.fill_(real_label)  # fake labels are real for generator cost
+        #
+        # rec = netG(input)  # this tensor is freed from mem at this point
+        # output = netD(rec)
+        # errG = criterion(output, label)
+        # errG.backward()
+        # D_G_z2 = output.data.mean()
+        # optimizerG.step()
 
-        rec = netG(input) # this tensor is freed from mem at this point
-        output = netD(rec)
-        errG = criterion(output, label)
-        errG.backward()
-        D_G_z2 = output.data.mean()
-        optimizerG.step()
 
-        print('[%d/%d][%d/%d] Loss_VAE: %.4f Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
-              % (epoch, opt.niter, i, len(dataloader),
-                 VAEerr.item(), errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
+        if i % 10 == 0:
+            # print('[%d/%d][%d/%d] Loss_VAE: %.4f Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
+            #       % (epoch, opt.niter, i, len(dataloader),
+            #          VAEerr.item(), errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
+            step = epoch * len(dataloader) + i
+            writer.add_scalar("losses/VAE", VAEerr.item(), step)
+            # writer.add_scalar("losses/Generator", errG.item(), step)
+            writer.add_scalar("losses/Discriminator", errD.item(), step)
+            writer.add_scalar("Probability/D_x", D_x, step)
+            writer.add_scalar("Probability/D_G_z", D_G_z1, step)
+            # writer.add_scalar("Probability/D_G_E_z", D_G_z2, step)
+
+    writer.add_image("Images/samples", make_grid(gen, nrow=16), global_step=epoch)
+    writer.add_image("Images/original", make_grid(input, nrow=16), global_step=epoch)
+    writer.add_image("Images/reconstructions", make_grid(rec, nrow=16), global_step=epoch)
 
     # if epoch%opt.saveInt == 0 and epoch!=0:
     #     torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))

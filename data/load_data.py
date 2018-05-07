@@ -1,7 +1,4 @@
-
-import torch.utils.data
 import torchvision.transforms as transforms
-import visdom
 from torchvision.datasets import MNIST
 import torchvision.datasets as dset
 
