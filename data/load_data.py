@@ -20,7 +20,7 @@ def load_data(dataset_name, data_root=None, img_size=None):
                         transform=transforms.Compose([
                             transforms.Resize(img_size),
                             transforms.ToTensor(),
-                            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                         ]))
         # elif opt.dataset == 'lsun':
         #     dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],

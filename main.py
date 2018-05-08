@@ -7,6 +7,9 @@ import torch
 import torch.nn as nn
 import torch.nn.parallel
 import torch.utils.data
+
+from torch.nn import functional as F
+
 # import visdom
 import torch.optim as optim
 from data.load_data import load_data
@@ -30,7 +33,7 @@ parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
 parser.add_argument('--niter', type=int, default=25, help='number of epochs to train for')
 parser.add_argument('--saveInt', type=int, default=25, help='number of epochs between checkpoints')
-parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
+parser.add_argument('--lr', type=float, default=0.001, help='learning rate, default=0.0002')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
 parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
@@ -88,7 +91,7 @@ class _Sampler(nn.Module):
         mu = input[0]
         logvar = input[1]
 
-        std = logvar.mul(0.5).exp_()  # calculate the STDEV
+        std = torch.exp(0.5 * logvar)
         if opt.cuda:
             eps = torch.cuda.FloatTensor(std.size()).normal_()  # random normalized noise
         else:
@@ -163,7 +166,8 @@ class _netG(nn.Module):
             self.decoder.add_module('pyramid_{0}_relu'.format(ngf * 2 ** (i - 1)), nn.ReLU(inplace=True))
 
         self.decoder.add_module('ouput-conv', nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False))
-        self.decoder.add_module('output-tanh', nn.Tanh())
+        self.decoder.add_module('Sigmoid', nn.Sigmoid())
+        # self.decoder.add_module('output-tanh', nn.Tanh())
 
     def forward(self, input):
         output = self.encoder(input)
@@ -219,7 +223,7 @@ real_label = 1
 fake_label = 0
 
 netG = _netG(opt.imageSize, ngpu)
-netG.apply(weights_init)
+# netG.apply(weights_init)
 # if opt.netG != '':
 #     netG.load_state_dict(torch.load(opt.netG))
 
@@ -235,13 +239,9 @@ MSECriterion = nn.MSELoss()
 if opt.cuda:
     print("OK")
     netD.cuda()
-    print("OK")
     netG.make_cuda()
-    print("OK")
     criterion.cuda()
-    print("OK")
     MSECriterion.cuda()
-    print("OK")
     input, label = input.cuda(), label.cuda()
     print("OK")
     noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
@@ -255,11 +255,12 @@ writer = SummaryWriter()
 #
 for epoch in range(opt.niter):
     for i, data in enumerate(dataloader, 0):
+        optimizerG.zero_grad()
+        # optimizerG.zero_grad()
         ############################
         # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
         ###########################
         # train with real
-        netD.zero_grad()
         real_cpu, _ = data
         batch_size = real_cpu.size(0)
         input.data.resize_(real_cpu.size()).copy_(real_cpu)
@@ -281,10 +282,10 @@ for epoch in range(opt.niter):
         label.data.fill_(fake_label)
         output = netD(gen.detach())
         errD_fake = criterion(output, label)
-        errD_fake.backward()
+        # errD_fake.backward()
         D_G_z1 = output.data.mean()
         errD = errD_real + errD_fake
-        optimizerD.step()
+        # optimizerD.step()
         ############################
         # (2) Update G network: VAE
         ###########################
@@ -293,8 +294,10 @@ for epoch in range(opt.niter):
         mu = encoded[0]
         logvar = encoded[1]
 
+        # KLD_element = mu.pow(2).add_(logvar.exp()).mul_(-1).add_(1).add_(logvar)
         KLD_element = mu.pow(2).add_(logvar.exp()).mul_(-1).add_(1).add_(logvar)
         KLD = torch.sum(KLD_element).mul_(-0.5)
+        KLD /= opt.batchSize
 
         sampled = netG.sampler(encoded)
         rec = netG.decoder(sampled)
@@ -302,9 +305,16 @@ for epoch in range(opt.niter):
         #     save_image(combine_images(rec), f"reconstructions/{epoch}_{i}.png")
         # rec_win = vis.image(rec.data[0].cpu()*0.5+0.5,win = rec_win)
 
-        MSEerr = MSECriterion(rec,input)
+        zero_to_one_input = (input + 1.) / 2.
 
-        VAEerr = KLD + MSEerr
+        bce_loss = torch.nn.BCEWithLogitsLoss()
+
+        # rec_err = MSECriterion(rec, input)
+        # rec_err = bce_loss(input=rec, target=input)
+        rec_err = F.binary_cross_entropy(rec, input, size_average=False)
+
+        # VAEerr = KLD + MSEerr
+        VAEerr = rec_err + KLD
         VAEerr.backward()
         optimizerG.step()
 
@@ -315,26 +325,27 @@ for epoch in range(opt.niter):
         # label.data.fill_(real_label)  # fake labels are real for generator cost
         #
         # rec = netG(input)  # this tensor is freed from mem at this point
-        # output = netD(rec)
-        # errG = criterion(output, label)
+        output = netD(netG(input))
+        errG = criterion(output, label)
         # errG.backward()
-        # D_G_z2 = output.data.mean()
+        D_G_z2 = output.data.mean()
         # optimizerG.step()
 
 
         if i % 10 == 0:
-            # print('[%d/%d][%d/%d] Loss_VAE: %.4f Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
-            #       % (epoch, opt.niter, i, len(dataloader),
-            #          VAEerr.item(), errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
+            print('[%d/%d][%d/%d] Rec loss: %.4f Loss_VAE: %.4f Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
+                  % (epoch, opt.niter, i, len(dataloader), rec_err.item(),
+                     VAEerr.item(), errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
             step = epoch * len(dataloader) + i
+            writer.add_scalar("losses/Reconstruction", rec_err.item(), step)
             writer.add_scalar("losses/VAE", VAEerr.item(), step)
             # writer.add_scalar("losses/Generator", errG.item(), step)
-            writer.add_scalar("losses/Discriminator", errD.item(), step)
-            writer.add_scalar("Probability/D_x", D_x, step)
-            writer.add_scalar("Probability/D_G_z", D_G_z1, step)
+            # writer.add_scalar("losses/Discriminator", errD.item(), step)
+            # writer.add_scalar("Probability/D_x", D_x, step)
+            # writer.add_scalar("Probability/D_G_z", D_G_z1, step)
             # writer.add_scalar("Probability/D_G_E_z", D_G_z2, step)
-
-    writer.add_image("Images/samples", make_grid(gen, nrow=16), global_step=epoch)
+    #
+    # writer.add_image("Images/samples", make_grid(gen, nrow=16), global_step=epoch)
     writer.add_image("Images/original", make_grid(input, nrow=16), global_step=epoch)
     writer.add_image("Images/reconstructions", make_grid(rec, nrow=16), global_step=epoch)
 
