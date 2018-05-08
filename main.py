@@ -33,7 +33,7 @@ parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
 parser.add_argument('--niter', type=int, default=25, help='number of epochs to train for')
 parser.add_argument('--saveInt', type=int, default=25, help='number of epochs between checkpoints')
-parser.add_argument('--lr', type=float, default=0.001, help='learning rate, default=0.0002')
+parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda', action='store_true', help='enables cuda')
 parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
@@ -166,8 +166,8 @@ class _netG(nn.Module):
             self.decoder.add_module('pyramid_{0}_relu'.format(ngf * 2 ** (i - 1)), nn.ReLU(inplace=True))
 
         self.decoder.add_module('ouput-conv', nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False))
-        self.decoder.add_module('Sigmoid', nn.Sigmoid())
-        # self.decoder.add_module('output-tanh', nn.Tanh())
+        # self.decoder.add_module('Sigmoid', nn.Sigmoid())
+        self.decoder.add_module('output-tanh', nn.Tanh())
 
     def forward(self, input):
         output = self.encoder(input)
@@ -223,7 +223,7 @@ real_label = 1
 fake_label = 0
 
 netG = _netG(opt.imageSize, ngpu)
-# netG.apply(weights_init)
+netG.apply(weights_init)
 # if opt.netG != '':
 #     netG.load_state_dict(torch.load(opt.netG))
 
@@ -255,8 +255,7 @@ writer = SummaryWriter()
 #
 for epoch in range(opt.niter):
     for i, data in enumerate(dataloader, 0):
-        optimizerG.zero_grad()
-        # optimizerG.zero_grad()
+        optimizerD.zero_grad()
         ############################
         # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
         ###########################
@@ -282,14 +281,14 @@ for epoch in range(opt.niter):
         label.data.fill_(fake_label)
         output = netD(gen.detach())
         errD_fake = criterion(output, label)
-        # errD_fake.backward()
+        errD_fake.backward()
         D_G_z1 = output.data.mean()
         errD = errD_real + errD_fake
-        # optimizerD.step()
+        optimizerD.step()
         ############################
         # (2) Update G network: VAE
         ###########################
-
+        optimizerG.zero_grad()
         encoded = netG.encoder(input)
         mu = encoded[0]
         logvar = encoded[1]
@@ -297,39 +296,40 @@ for epoch in range(opt.niter):
         # KLD_element = mu.pow(2).add_(logvar.exp()).mul_(-1).add_(1).add_(logvar)
         KLD_element = mu.pow(2).add_(logvar.exp()).mul_(-1).add_(1).add_(logvar)
         KLD = torch.sum(KLD_element).mul_(-0.5)
-        KLD /= opt.batchSize
+        KLD /= (opt.batchSize * 32 * 32)
 
         sampled = netG.sampler(encoded)
         rec = netG.decoder(sampled)
         # if i == 0:
         #     save_image(combine_images(rec), f"reconstructions/{epoch}_{i}.png")
         # rec_win = vis.image(rec.data[0].cpu()*0.5+0.5,win = rec_win)
+        # zero_to_one_input = (input + 1.) / 2.
 
-        zero_to_one_input = (input + 1.) / 2.
-
-        bce_loss = torch.nn.BCEWithLogitsLoss()
-
-        # rec_err = MSECriterion(rec, input)
-        # rec_err = bce_loss(input=rec, target=input)
-        rec_err = F.binary_cross_entropy(rec, input, size_average=False)
+        # rec_err = F.binary_cross_entropy(rec, input, size_average=False)
+        rec_err = F.mse_loss(rec, input, size_average=True)
 
         # VAEerr = KLD + MSEerr
-        VAEerr = rec_err + KLD
+        VAEerr = (rec_err + KLD)
         VAEerr.backward()
         optimizerG.step()
 
         ############################
         # (3) Update G network: maximize log(D(G(z)))
         ###########################
-        # netG.zero_grad()
-        # label.data.fill_(real_label)  # fake labels are real for generator cost
+        optimizerG.zero_grad()
+        label.data.fill_(real_label)  # fake labels are real for generator cost
         #
-        # rec = netG(input)  # this tensor is freed from mem at this point
-        output = netD(netG(input))
+        rec = netG(input)  # this tensor is freed from mem at this point
+        output = netD(rec)
         errG = criterion(output, label)
-        # errG.backward()
+
+        noise.data.normal_(0, 1)
+        new_gen = netG.decoder(noise)
+        errG += criterion(netD(new_gen), label)
+
+        errG.backward()
         D_G_z2 = output.data.mean()
-        # optimizerG.step()
+        optimizerG.step()
 
 
         if i % 10 == 0:
@@ -339,15 +339,15 @@ for epoch in range(opt.niter):
             step = epoch * len(dataloader) + i
             writer.add_scalar("losses/Reconstruction", rec_err.item(), step)
             writer.add_scalar("losses/VAE", VAEerr.item(), step)
-            # writer.add_scalar("losses/Generator", errG.item(), step)
-            # writer.add_scalar("losses/Discriminator", errD.item(), step)
-            # writer.add_scalar("Probability/D_x", D_x, step)
-            # writer.add_scalar("Probability/D_G_z", D_G_z1, step)
-            # writer.add_scalar("Probability/D_G_E_z", D_G_z2, step)
+            writer.add_scalar("losses/Generator", errG.item(), step)
+            writer.add_scalar("losses/Discriminator", errD.item(), step)
+            writer.add_scalar("Probability/D_x", D_x, step)
+            writer.add_scalar("Probability/D_G_z", D_G_z1, step)
+            writer.add_scalar("Probability/D_G_E_z", D_G_z2, step)
     #
-    # writer.add_image("Images/samples", make_grid(gen, nrow=16), global_step=epoch)
-    writer.add_image("Images/original", make_grid(input, nrow=16), global_step=epoch)
-    writer.add_image("Images/reconstructions", make_grid(rec, nrow=16), global_step=epoch)
+    writer.add_image("Images/samples", make_grid((gen + 1) / 2, nrow=16), global_step=epoch)
+    writer.add_image("Images/original", make_grid((input + 1) / 2, nrow=16), global_step=epoch)
+    writer.add_image("Images/reconstructions", make_grid((rec + 1) / 2, nrow=16), global_step=epoch)
 
     # if epoch%opt.saveInt == 0 and epoch!=0:
     #     torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch))
