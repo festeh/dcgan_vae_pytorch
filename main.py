@@ -283,7 +283,12 @@ for epoch in range(opt.niter):
         errD_fake = criterion(output, label)
         errD_fake.backward()
         D_G_z1 = output.data.mean()
-        errD = errD_real + errD_fake
+
+        output_rec = netD(netG(input).detach())
+        errD_fake_rec = criterion(output_rec, label)
+        errD_fake_rec.backward()
+
+        errD = errD_real + errD_fake + errD_fake_rec
         optimizerD.step()
         ############################
         # (2) Update G network: VAE
@@ -306,12 +311,13 @@ for epoch in range(opt.niter):
         # zero_to_one_input = (input + 1.) / 2.
 
         # rec_err = F.binary_cross_entropy(rec, input, size_average=False)
-        rec_err = F.mse_loss(rec, input, size_average=True)
+        # rec_err = F.mse_loss(rec, input, size_average=True)
+        rec_err = F.l1_loss(rec, input)
 
         # VAEerr = KLD + MSEerr
-        VAEerr = (rec_err + KLD)
+        VAEerr = (0.2 * rec_err + KLD)
 
-        scaled_VAEerr = 5. * VAEerr
+        scaled_VAEerr = 500. * VAEerr
 
         scaled_VAEerr.backward()
         optimizerG.step()
